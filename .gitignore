@@ -1,0 +1,23 @@
+# NOTE: .gitmodules MUST be tracked - do not add it here.
+
+# Editor / OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local build/cache scratch dirs
+build/
+dist/
+.cache/
+.ccache/
+
+# docker-compose override conventions (per-developer local tweaks)
+docker-compose.override.yml
+docker-compose.local.yml
+
+# Local env files (avoid leaking secrets)
+.env
+.env.*
+!.env.example

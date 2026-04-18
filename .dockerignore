@@ -1,0 +1,33 @@
+# Exclude noise from the build context. The Dockerfile only consumes
+# docker/** and external/ollama/**, so anything outside those is wasted bytes.
+
+# Top-level files that the build doesn't need.
+.git
+.gitignore
+.gitmodules
+.github/
+.vscode/
+.idea/
+README.md
+Makefile
+docker-compose.yml
+docker-compose.*.yml
+
+# Inside the ollama submodule: skip dirs the build doesn't touch.
+external/ollama/.git
+external/ollama/.github/
+external/ollama/docs/
+external/ollama/macapp/
+external/ollama/scripts/
+external/ollama/test/
+external/ollama/integration/
+external/ollama/openai/testdata/
+external/ollama/server/testdata/
+
+# Build artifacts that should never end up in the context.
+**/build/
+**/dist/
+**/.cache/
+**/.ccache/
+**/.DS_Store
+**/*.swp
