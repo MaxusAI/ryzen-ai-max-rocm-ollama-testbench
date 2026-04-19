@@ -18,6 +18,11 @@
 
 # shellcheck shell=bash
 
+# Directory of this lib file (so we can find sibling .py parsers without
+# depending on the caller's $PWD or $REPO_ROOT). BASH_SOURCE[0] is the
+# path to this file even when sourced.
+_SNAPSHOT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ---------------------------------------------------------------------------
 # json helpers
 # ---------------------------------------------------------------------------
@@ -282,52 +287,57 @@ snapshot_ollama_config_json() {
     printf '%s' "$parsed"
 }
 
+# snapshot_ollama_cfg_vars [json] - parse a server-config JSON object
+# (as produced by snapshot_ollama_config_json) into a fixed-shape, space-
+# separated tuple of the 10 keys most relevant to "how much load will
+# Ollama accept". Caller is expected to read into 10 named variables:
+#
+#     read -r CFG_NUM_PARALLEL CFG_MAX_QUEUE CFG_MAX_LOADED CFG_KEEP_ALIVE \
+#             CFG_FLASH_ATTN  CFG_KV_CACHE  CFG_NEW_ENGINE  CFG_CTX_LEN  \
+#             CFG_LOAD_TIMEOUT CFG_GPU_OVERHEAD <<<"$(snapshot_ollama_cfg_vars "$cfg_json")"
+#
+# Order is contractual; do not reshuffle without updating callers.
+# Missing/empty values become "?". KV_CACHE specifically defaults to "f16"
+# because that's Ollama's effective default when no env var is set.
+#
+# If $1 is omitted or "null", we call snapshot_ollama_config_json
+# ourselves so a caller that doesn't need the raw JSON can skip the
+# extra step.
+snapshot_ollama_cfg_vars() {
+    local json="${1:-}"
+    if [ -z "$json" ] || [ "$json" = "null" ]; then
+        json=$(snapshot_ollama_config_json)
+    fi
+    printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    if d is None: d = {}
+except Exception:
+    d = {}
+def g(k, default="?"):
+    v = d.get(k, default)
+    return default if v == "" else v
+print(" ".join([
+    str(g("OLLAMA_NUM_PARALLEL")),
+    str(g("OLLAMA_MAX_QUEUE")),
+    str(g("OLLAMA_MAX_LOADED_MODELS")),
+    str(g("OLLAMA_KEEP_ALIVE")),
+    str(g("OLLAMA_FLASH_ATTENTION")),
+    str(g("OLLAMA_KV_CACHE_TYPE", "f16")),
+    str(g("OLLAMA_NEW_ENGINE")),
+    str(g("OLLAMA_CONTEXT_LENGTH")),
+    str(g("OLLAMA_LOAD_TIMEOUT")),
+    str(g("OLLAMA_GPU_OVERHEAD")),
+]))'
+}
+
 # Internal: parse one journalctl/docker-logs line into a flat JSON
-# object of OLLAMA_* keys. Splits to a separate function so the parser
-# can be tested in isolation and also reused by callers that already
-# have the line cached.
+# object of OLLAMA_* keys. Thin wrapper around lib/parse_server_config.py
+# so the bracket-balancing parser lives in proper Python (testable,
+# linter-friendly) instead of a heredoc.
 _snapshot_parse_server_config() {
-    python3 -c '
-import sys, re, json
-line = sys.stdin.read()
-m = re.search(r"env=\"map\[(.+)\]\"", line)
-if not m:
-    print("null"); sys.exit(0)
-body = m.group(1)
-out = {}
-i, n = 0, len(body)
-while i < n:
-    while i < n and body[i] == " ":
-        i += 1
-    if i >= n:
-        break
-    j = i
-    while j < n and body[j] != ":":
-        j += 1
-    if j >= n:
-        break
-    key = body[i:j]
-    j += 1
-    if j < n and body[j] == "[":
-        depth, k = 1, j + 1
-        while k < n and depth > 0:
-            if body[k] == "[": depth += 1
-            elif body[k] == "]": depth -= 1
-            k += 1
-        value = body[j+1:k-1]
-        i = k
-    else:
-        k = j
-        while k < n and body[k] != " ":
-            k += 1
-        value = body[j:k]
-        i = k
-    # Keep only OLLAMA_* keys; drop the noisy default origins list
-    # (15+ URLs, never useful for debugging) and the proxy vars.
-    if key.startswith("OLLAMA_") and key != "OLLAMA_ORIGINS":
-        out[key] = value
-print(json.dumps(out, separators=(",",":")))
-'
+    python3 "${_SNAPSHOT_LIB_DIR}/parse_server_config.py"
 }
 
 # Marketing name of the (first) discovered GPU. Strips leading whitespace.
@@ -469,98 +479,11 @@ snapshot_ollama_runtime_state_json() {
         return
     fi
 
-    # Hand to python for the actual extraction. We use the LAST
-    # occurrence of each marker (most recent model load wins). The KV
-    # cache line's regex captures K/V quant types (f16, q8_0, q4_0, ...)
-    # and total size in MiB; the runner cmd line yields the model
-    # blob/path; the inference-compute line gives the library + arch.
-    printf '%s\n' "$raw" | python3 -c '
-import sys, re, json
-lines = [l.strip() for l in sys.stdin if l.strip()]
-out = {}
-
-def last(pattern, line=None):
-    rx = re.compile(pattern)
-    for l in reversed(lines):
-        m = rx.search(l)
-        if m:
-            return m
-    return None
-
-# library / compute (daemon-level inference-compute line).
-m = last(r"library=(\S+)\s+compute=(\S+)")
-if m:
-    out["library"] = m.group(1)
-    out["compute"] = m.group(2)
-
-# Most recent model load: extract path/digest from the runner cmd line.
-m = last(r"--model\s+(\S+)")
-if m:
-    p = m.group(1)
-    out["model_path"] = p
-    # Short form: "sha256-abcd..." -> "sha256-abcd1234"
-    short = p.rsplit("/", 1)[-1]
-    if short.startswith("sha256-"):
-        short = short[:14]
-    out["model_short"] = short
-
-# Flash-attn: requested vs resolved. There are THREE log shapes we
-# care about, in priority order for the resolved value:
-#  1. Auto path (most common): "Flash Attention was auto, set to enabled"
-#  2. Explicit-on path:        "msg=\"enabling flash attention\""    (Ollama daemon)
-#  3. Load-request canonical:  "FlashAttention:Enabled" / "Disabled" (in load request struct)
-# The 2nd and 3rd shapes appear when the user sets OLLAMA_FLASH_ATTENTION=1
-# explicitly - in that case llama.cpp does not print the "was auto"
-# message because no auto-resolution happened.
-m = last(r"llama_context: flash_attn\s*=\s*(\S+)")
-if m:
-    out["flash_attn_requested"] = m.group(1)
-m = last(r"Flash Attention was \S+, set to (\S+)")
-if m:
-    out["flash_attn_resolved"] = m.group(1)
-else:
-    # Fallback 1: Ollama daemon-level explicit-enable log.
-    if last(r"msg=\"enabling flash attention\""):
-        out["flash_attn_resolved"] = "enabled"
-    else:
-        # Fallback 2: load-request struct exposes the final decision.
-        m = last(r"FlashAttention:(\S+?)[\s}]")
-        if m:
-            out["flash_attn_resolved"] = m.group(1).lower()
-
-# KV cache: total + K/V quant types and sizes + sequence count. The
-# total can look "bigger than expected" when OLLAMA_NUM_PARALLEL > 1
-# because Ollama allocates one KV slot per concurrent sequence; we
-# capture the seq count so the printer can show per-seq size too.
-#   "llama_kv_cache: size = 15232.00 MiB (131072 cells,  28 layers,  2/2 seqs),
-#       K (q8_0): 7616.00 MiB, V (q8_0): 7616.00 MiB"
-m = last(r"llama_kv_cache: size = ([\d.]+) MiB \((\d+) cells,\s*(\d+) layers,\s*(\d+)/(\d+) seqs.*K \((\S+)\): ([\d.]+) MiB, V \((\S+)\): ([\d.]+) MiB")
-if m:
-    out["kv_cache_total_mib"] = float(m.group(1))
-    out["kv_cache_cells"]     = int(m.group(2))
-    out["kv_cache_layers"]    = int(m.group(3))
-    out["kv_cache_seqs"]      = int(m.group(5))
-    out["kv_cache_k_type"]    = m.group(6)
-    out["kv_cache_k_mib"]     = float(m.group(7))
-    out["kv_cache_v_type"]    = m.group(8)
-    out["kv_cache_v_mib"]     = float(m.group(9))
-
-# Compute scratch buffers (device + host pinned). The two log lines
-# look like:
-#   "llama_context:      ROCm0      compute buffer size =   408.01 MiB"
-#   "llama_context:  ROCm_Host      compute buffer size =   262.01 MiB"
-# We want them in the right slots: device buffer is NOT *_Host, host
-# buffer IS *_Host. Negative lookahead keeps `_Host` lines out of the
-# device match.
-m = last(r"llama_context:\s+(?!\S+_Host)\S+\s+compute buffer size =\s*([\d.]+) MiB")
-if m:
-    out["compute_buffer_mib"] = float(m.group(1))
-m = last(r"llama_context:\s+\S+_Host\s+compute buffer size =\s*([\d.]+) MiB")
-if m:
-    out["host_compute_buffer_mib"] = float(m.group(1))
-
-print(json.dumps(out, separators=(",",":")) if out else "null")
-'
+    # Hand to python for the actual extraction. The parser lives in
+    # lib/parse_runtime_state.py (regex set is dense + has its own
+    # fallback chain for flash-attn detection - far easier to read in
+    # proper Python than wedged into a bash heredoc).
+    printf '%s\n' "$raw" | python3 "${_SNAPSHOT_LIB_DIR}/parse_runtime_state.py"
 }
 
 # snapshot_versions_json - print one JSON object capturing the current
