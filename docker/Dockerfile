@@ -82,7 +82,7 @@ RUN --mount=type=cache,target=/root/.ccache \
 # `TensileLibrary_Type_DD_Contraction_l_Ailk_Bljk_Cijk_Dijk_fallback.dat`
 # (no arch suffix) that are read at rocBLAS init - delete them and you get
 # `Memory access fault by GPU node-1 ... Reason: Page not present` during
-# the first rocBLAS call. See docs/build-fixes.md (Fix 3).
+# the first rocBLAS call. See docs/build-fixes.md (Fix 2).
 #
 # Arch list mirrors the "ROCm 7" preset's AMDGPU_TARGETS in
 # external/ollama/CMakePresets.json:85, minus gfx1151.

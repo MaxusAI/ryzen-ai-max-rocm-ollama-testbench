@@ -54,15 +54,23 @@ services:
       OLLAMA_MODELS: "/root/.ollama/models"
 
       # Surface ROCm GPU discovery in the logs (rocm/HSA per-device info).
-      OLLAMA_DEBUG: "2"
+      # Override at compose-up time, e.g. `OLLAMA_DEBUG=0 docker compose up`,
+      # to silence the verbose per-token timing once your stack is healthy.
+      OLLAMA_DEBUG: "${OLLAMA_DEBUG:-2}"
 
-      # Forces faUserSet=true at external/ollama/llm/server.go:195 so flash
+      # Sets faUserSet=true at external/ollama/llm/server.go:194-196 so flash
       # attention is requested even on devices the auto-policy would skip.
       # Falls back to f16 KV cache silently if FA actually fails (server.go:240).
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: "q8_0"
 
       OLLAMA_KEEP_ALIVE: "24h"
+      # Conservative defaults: serve one model at a time, one request at a
+      # time. Optimised for 'long-context single-user gemma4:31b' (~43 GiB of
+      # weights+KV at 256K). For smaller models or shared workloads, raise
+      # OLLAMA_NUM_PARALLEL to 2 (matches docs/break-modes.md L14 host setup).
+      # docs/break-modes.md walks through what fails first when these are bumped.
+      # scripts/stress-test.sh warns if --concurrency exceeds the running value.
       OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_NUM_PARALLEL: "1"
 

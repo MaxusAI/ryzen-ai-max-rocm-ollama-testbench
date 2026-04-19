@@ -4,8 +4,9 @@
 # Prints a one-shot ROCm/GPU discovery summary on startup so `docker compose
 # logs ollama` shows whether the GPU was detected, then execs `ollama "$@"`.
 #
-# Tip: set OLLAMA_DEBUG=2 in the environment to also dump ollama's per-device
-# discovery output (rocm/HSA logs).
+# OLLAMA_DEBUG defaults to 2 in docker-compose.yml so ollama's per-device
+# discovery output (rocm/HSA logs) is visible. Override at compose-up time
+# (e.g. `OLLAMA_DEBUG=0 docker compose up`) to silence that once healthy.
 
 set -euo pipefail
 
@@ -37,6 +38,7 @@ ls -l /dev/dri 2>/dev/null | sed 's/^/[entrypoint]   /' >&2 || log "/dev/dri not
 
 log "OLLAMA_HOST=${OLLAMA_HOST:-unset}"
 log "OLLAMA_MODELS=${OLLAMA_MODELS:-unset}"
+log "OLLAMA_DEBUG=${OLLAMA_DEBUG:-unset}"
 log "OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-unset}"
 log "OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE:-unset}"
 log "OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-unset (server picks)}"
