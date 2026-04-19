@@ -52,34 +52,47 @@ ps: ## Show ollama loaded-models table.
 rocm-smi: ## Run rocm-smi inside the container.
 	$(COMPOSE) exec $(SERVICE) rocm-smi
 
-test-fa: ## Fire one short generation at $(CTX) ctx, then classify the FA branch.
+test-fa: ## Fire one short generation at $(CTX) ctx, then classify the FA branch (auto-detects container vs host Ollama). Requires $(MODEL) to be pulled.
 	@echo "--- POST /api/generate model=$(MODEL) num_ctx=$(CTX) num_predict=4 ---"
 	@curl --silent --show-error --fail \
 		--request POST \
 		--header 'content-type: application/json' \
 		--data '{"model":"$(MODEL)","prompt":"hello","stream":false,"options":{"num_ctx":$(CTX),"num_predict":4}}' \
 		http://localhost:$(HOST_PORT)/api/generate \
-		| sed 's/^/  /' || echo "  (request failed; check 'make logs')"
+		| sed 's/^/  /' || echo "  (request failed; check 'make logs' for container mode or 'journalctl --unit ollama' for host mode)"
 	@echo
 	@echo "--- FA classification (last 300 server log lines) ---"
-	@$(COMPOSE) logs --tail 300 $(SERVICE) 2>&1 \
-		| grep --extended-regexp \
-			--ignore-case \
-			'flash attention|enabling flash|kv cache type|not supported by gpu' \
-		|| echo "  (no flash-attention or kv-cache lines found)"
+	@FA_RX='flash attention|enabling flash|kv cache type|not supported by gpu'; \
+	if [ -n "$$($(COMPOSE) ps --quiet $(SERVICE) 2>/dev/null)" ]; then \
+		echo "  (source: $(COMPOSE) logs $(SERVICE))"; \
+		matches=$$($(COMPOSE) logs --tail 300 $(SERVICE) 2>&1 \
+			| grep --extended-regexp --ignore-case "$$FA_RX" || true); \
+	elif command -v journalctl >/dev/null 2>&1 && systemctl is-active --quiet ollama 2>/dev/null; then \
+		echo "  (source: sudo journalctl --unit ollama --since '5 min ago')"; \
+		matches=$$(sudo --non-interactive journalctl --unit ollama --no-pager --since '5 min ago' 2>/dev/null \
+			| grep --extended-regexp --ignore-case "$$FA_RX" || true); \
+		if [ -z "$$matches" ] && ! sudo --non-interactive true 2>/dev/null; then \
+			echo "  (sudo creds not cached for journalctl - run 'sudo -v' then retry)"; \
+		fi; \
+	else \
+		echo "  (no running ollama container nor active systemd unit; nothing to classify)"; \
+		matches=""; \
+	fi; \
+	if [ -n "$$matches" ]; then echo "$$matches" | sed 's/^/  /'; \
+	else echo "  (no flash-attention or kv-cache lines found in the inspected logs)"; fi
 	@echo
 	@echo "Branch (a) FA works:        expect 'enabling flash attention' + 'kv cache type: q8_0'"
 	@echo "Branch (b) FA disabled:     expect 'flash attention enabled but not supported' + 'kv cache type: f16'"
-	@echo "Branch (c) runner crashed:  no FA/kv lines AND 'docker compose ps' shows unhealthy"
+	@echo "Branch (c) runner crashed:  no FA/kv lines AND 'docker compose ps' / 'systemctl status ollama' shows unhealthy"
 
 clean-image: ## Remove the built image (forces a full rebuild next time).
 	docker image rm amd-rocm-ollama:7.2.2 || true
 
-validate: ## Run the 9-layer validation ladder, skipping the slow Layer 8.
-	./scripts/validate.sh --skip-long-ctx
+validate: ## Run the 9-layer validation ladder, skipping the slow Layer 8. Pass extra flags via ARGS=, e.g. `make validate ARGS="--mode host --layer 5"`.
+	./scripts/validate.sh --skip-long-ctx $(ARGS)
 
-validate-full: ## Run the full 9-layer validation including ~200K-token Layer 8 (slow).
-	./scripts/validate.sh
+validate-full: ## Run the full 9-layer validation including ~200K-token Layer 8 (slow). Extra flags via ARGS=.
+	./scripts/validate.sh $(ARGS)
 
 mes-check: ## Quick check: is the running MES firmware safe (NOT the 0x83 regression)?
 	./scripts/install-mes-firmware.sh --check
