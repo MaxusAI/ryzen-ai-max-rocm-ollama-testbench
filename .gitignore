@@ -21,3 +21,8 @@ docker-compose.local.yml
 .env
 .env.*
 !.env.example
+
+# Per-machine runtime artifacts from log-run.sh / validate.sh / stress-test.sh.
+# The JSONL records embed host-specific data (hostname, kernel, MES firmware,
+# loaded models, VRAM split). Track per-machine, do not share via git.
+logs/
