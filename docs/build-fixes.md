@@ -524,13 +524,19 @@ Environment="OLLAMA_MODELS=/usr/share/ollama/.ollama/models"   # explicit, defau
 
 That's it. Three operational `Environment=` lines, no `User=` change,
 no `OLLAMA_ROCM=1`, no `*_VISIBLE_DEVICES`, no `GGML_USE_ROCM=1`, no
-nothing else. The discovery log proves the auto-selection works
-correctly on its own:
+nothing else. The discovery log (host install; runners under
+`/usr/local/lib/ollama/`) proves the auto-selection works correctly on
+its own:
 
 ```text
 load_backend: loaded ROCm backend from /usr/local/lib/ollama/rocm/libggml-hip.so
 ... msg="inference compute" id=0 ... library=ROCm compute=gfx1151 name=ROCm0 description="Radeon 8060S Graphics" ...
 ```
+
+(In container mode the same line points at `/usr/lib/ollama/rocm/...`
+because the Dockerfile installs runners under `/usr/lib/ollama/`. The
+host paths in this section are `/usr/local/lib/ollama/`; the container
+paths are `/usr/lib/ollama/`. Same files, different prefix.)
 
 Why each operational override exists (none of these change which GPU
 backend gets picked):
@@ -543,7 +549,8 @@ backend gets picked):
 
 **What Ollama 0.21.0 does on its own.** From the actual subprocess
 launch line in `journalctl --unit=ollama`
-(`source=server.go:445 msg=subprocess`):
+(`source=server.go:445 msg=subprocess`; host install, hence
+`/usr/local/lib/ollama` - container paths use `/usr/lib/ollama`):
 
 ```text
 LD_LIBRARY_PATH=/usr/local/lib/ollama:/usr/local/lib/ollama/rocm
@@ -558,7 +565,7 @@ it to `LD_LIBRARY_PATH`** and **automatically sets
 need to be set by hand. Setting them in the systemd unit is harmless
 (they'd just be redundant), but it isn't required.
 
-**If `make validate --mode host` reports Layer 5 `FAIL_CPU` or
+**If `./scripts/validate.sh --mode host` reports Layer 5 `FAIL_CPU` or
 `FAIL_VULKAN`,** the cause is *not* this section. Walk the layers in
 order:
 
@@ -628,7 +635,7 @@ Strix Halo, you must switch to `User=root`."** Disproved by removing
 $ sudo cat /proc/$(pgrep ollama)/status | grep -E '^(Uid|Gid|Groups):'
 Uid:    997     997     997     997      <-- ollama (NOT root)
 Groups: 44 984 992                       <-- video, ollama, render
-$ make validate --mode host -- --layer 5
+$ ./scripts/validate.sh --mode host --layer 5
 [PASS] library=ROCm + compute=gfx1151    <-- works fine as User=ollama
 ```
 
@@ -657,7 +664,7 @@ ii  mesa-vulkan-drivers:amd64  ...
 $ sudo journalctl --unit=ollama -n 100 | grep load_backend
 load_backend: loaded ROCm backend from /usr/local/lib/ollama/rocm/libggml-hip.so
 
-$ make validate --mode host -- --layer 5
+$ ./scripts/validate.sh --mode host --layer 5
 [PASS] library=ROCm + compute=gfx1151    <-- still ROCm, no env vars
 ```
 

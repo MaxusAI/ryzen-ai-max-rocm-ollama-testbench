@@ -95,10 +95,10 @@ or CPU instead of ROCm:** the cause is almost always Fix 4 (the MES
 Ollama silently falls back to Vulkan or CPU. Diagnosis:
 
 ```bash
-make mes-check                   # is the MES firmware safe?
-make install-mes-firmware        # if not, install the override
+make mes-check                              # is the MES firmware safe?
+make install-mes-firmware                   # if not, install the override
 sudo reboot
-make validate --mode host        # re-check
+./scripts/validate.sh --mode host           # re-check (--mode is a script flag, not a make flag)
 ```
 
 The minimal host systemd override is purely operational
