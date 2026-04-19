@@ -87,21 +87,11 @@ DRY_RUN=0
 CHARS_PER_TOKEN="3.21"
 
 # ---------------------------------------------------------------------------
-# pretty
+# pretty (colors + info/ok/warn/err/header from scripts/lib/pretty.sh)
 # ---------------------------------------------------------------------------
 
-if [ -t 1 ]; then
-    C_RESET=$'\e[0m'; C_RED=$'\e[31m'; C_GREEN=$'\e[32m'
-    C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
-else
-    C_RESET= C_RED= C_GREEN= C_YELLOW= C_BLUE= C_BOLD= C_DIM=
-fi
-
-info()   { printf '  %s\n' "$1"; }
-ok()     { printf '  %s[ OK ]%s %s\n' "${C_GREEN}" "${C_RESET}" "$1"; }
-warn()   { printf '  %s[WARN]%s %s\n' "${C_YELLOW}" "${C_RESET}" "$1"; }
-err()    { printf '  %s[FAIL]%s %s\n' "${C_RED}" "${C_RESET}" "$1" >&2; }
-header() { printf '\n%s%s%s\n' "${C_BOLD}${C_BLUE}" "$1" "${C_RESET}"; }
+# shellcheck source=lib/pretty.sh
+. "${REPO_ROOT}/scripts/lib/pretty.sh"
 
 usage() {
     sed --quiet '2,/^$/p' "$0" | sed 's/^# \?//'
@@ -146,59 +136,21 @@ done
 # pre-flight: pick model, pick num_ctx, check GPU sanity
 # ---------------------------------------------------------------------------
 
-# Largest installed model by file size, parsed from /api/tags.
-pick_largest_model() {
-    curl --silent --max-time 5 "${HOST}/api/tags" \
-        | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-ms=sorted(d.get("models",[]),key=lambda m:-m.get("size",0))
-print(ms[0]["name"] if ms else "")'
-}
+# API helpers (api_largest_model, api_model_size_bytes, api_bytes_to_gib,
+# api_model_max_context, api_alive) live in scripts/lib/api.sh. Sourced
+# below so the helpers see the final value of $HOST after argument parse.
 
-# On-disk size in bytes for a specific model tag, from /api/tags.
-# Used to surface "the test loaded a 27 GB model" in plan + summary
-# so VRAM peaks and per-request timings have something to scale against.
-model_size_bytes() {
-    local name="$1"
-    curl --silent --max-time 5 "${HOST}/api/tags" \
-        | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for m in d.get('models',[]):
-    if m.get('name')=='$name':
-        print(m.get('size',0)); break
-else:
-    print(0)"
-}
-
-# Convert bytes to a human GiB string with 2 decimals (e.g. '27.85').
-bytes_to_gib() {
-    awk --assign=b="$1" 'BEGIN { printf "%.2f", b/1024/1024/1024 }'
-}
-
-# Max context length declared by the model itself, via /api/show.
-model_max_context() {
-    local name="$1"
-    curl --silent --max-time 5 -X POST "${HOST}/api/show" \
-        --data "{\"model\":\"$name\"}" \
-        | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-mi=d.get("model_info",{})
-for k,v in mi.items():
-    if "context_length" in k and isinstance(v,int):
-        print(v); break
-else:
-    print(0)'
-}
+# shellcheck source=lib/api.sh
+. "${REPO_ROOT}/scripts/lib/api.sh"
 
 # Check Ollama is reachable; bail out fast if not.
-if ! curl --silent --max-time 2 "${HOST}/api/version" >/dev/null; then
+if ! api_alive 2; then
     err "cannot reach Ollama at ${HOST} (is the daemon running?)"
     exit 1
 fi
 
 if [ -z "$MODEL" ]; then
-    MODEL=$(pick_largest_model)
+    MODEL=$(api_largest_model)
     if [ -z "$MODEL" ]; then
         err "no models installed (pull one with: ollama pull <model>)"
         exit 1
@@ -206,16 +158,16 @@ if [ -z "$MODEL" ]; then
 fi
 
 if [ -z "$NUM_CTX" ]; then
-    NUM_CTX=$(model_max_context "$MODEL")
+    NUM_CTX=$(api_model_max_context "$MODEL")
     if [ -z "$NUM_CTX" ] || [ "$NUM_CTX" -lt 4096 ]; then
         warn "could not determine max context for $MODEL; defaulting to 32768"
         NUM_CTX=32768
     fi
 fi
 
-MODEL_SIZE_BYTES=$(model_size_bytes "$MODEL")
-MODEL_SIZE_GIB=$(bytes_to_gib "${MODEL_SIZE_BYTES:-0}")
-MODEL_MAX_CTX=$(model_max_context "$MODEL")
+MODEL_SIZE_BYTES=$(api_model_size_bytes "$MODEL")
+MODEL_SIZE_GIB=$(api_bytes_to_gib "${MODEL_SIZE_BYTES:-0}")
+MODEL_MAX_CTX=$(api_model_max_context "$MODEL")
 
 # Compute prompt size in tokens and chars. awk handles the float.
 PROMPT_TOKENS=$(awk --assign=n="$NUM_CTX" --assign=f="$PROMPT_FRAC" \
@@ -239,31 +191,13 @@ PROMPT_CHARS=$(awk --assign=t="$PROMPT_TOKENS" --assign=c="$CHARS_PER_TOKEN" \
 OLLAMA_CFG_JSON=$(snapshot_ollama_config_json)
 
 # Pull the keys most relevant to "how much stress will Ollama actually
-# accept" - everything else is in the JSONL log via log-run.sh.
+# accept" - everything else is in the JSONL log via log-run.sh. The
+# parser lives in lib/snapshot.sh as snapshot_ollama_cfg_vars (kept
+# next to snapshot_ollama_config_json for cohesion).
 read -r CFG_NUM_PARALLEL CFG_MAX_QUEUE CFG_MAX_LOADED CFG_KEEP_ALIVE \
         CFG_FLASH_ATTN  CFG_KV_CACHE  CFG_NEW_ENGINE  CFG_CTX_LEN \
-        CFG_LOAD_TIMEOUT CFG_GPU_OVERHEAD <<<"$(printf '%s' "$OLLAMA_CFG_JSON" | python3 -c '
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-    if d is None: d = {}
-except Exception:
-    d = {}
-def g(k, default="?"):
-    v = d.get(k, default)
-    return default if v == "" else v
-print(" ".join([
-    str(g("OLLAMA_NUM_PARALLEL")),
-    str(g("OLLAMA_MAX_QUEUE")),
-    str(g("OLLAMA_MAX_LOADED_MODELS")),
-    str(g("OLLAMA_KEEP_ALIVE")),
-    str(g("OLLAMA_FLASH_ATTENTION")),
-    str(g("OLLAMA_KV_CACHE_TYPE", "f16")),
-    str(g("OLLAMA_NEW_ENGINE")),
-    str(g("OLLAMA_CONTEXT_LENGTH")),
-    str(g("OLLAMA_LOAD_TIMEOUT")),
-    str(g("OLLAMA_GPU_OVERHEAD")),
-]))')"
+        CFG_LOAD_TIMEOUT CFG_GPU_OVERHEAD \
+        <<<"$(snapshot_ollama_cfg_vars "$OLLAMA_CFG_JSON")"
 
 header "Stress-test plan"
 info  "host:                ${HOST}"
@@ -332,16 +266,10 @@ fi
 # pre-flight: refuse to run if MES ring is already full
 # ---------------------------------------------------------------------------
 
-PRE_MES_DMESG=""
-if command -v sudo >/dev/null 2>&1; then
-    PRE_MES_DMESG=$(sudo --non-interactive dmesg 2>/dev/null \
-        | grep --extended-regexp 'MES failed to respond|amdgpu_mes_reg_write_reg_wait|MES ring buffer is full' \
-        || true)
-fi
-PRE_MES_TIMEOUT_COUNT=$(printf '%s\n' "$PRE_MES_DMESG" | grep --count --extended-regexp \
-    'MES failed to respond|amdgpu_mes_reg_write_reg_wait' || true)
-PRE_MES_RING_FULL_COUNT=$(printf '%s\n' "$PRE_MES_DMESG" | grep --count --extended-regexp \
-    'MES ring buffer is full' || true)
+# shellcheck source=lib/dmesg.sh
+. "${REPO_ROOT}/scripts/lib/dmesg.sh"
+PRE_MES_TIMEOUT_COUNT=$(mes_count_timeouts)
+PRE_MES_RING_FULL_COUNT=$(mes_count_ring_full)
 if [ "$PRE_MES_RING_FULL_COUNT" -gt 0 ]; then
     err "MES ring buffer is already full (per dmesg) - GPU is wedged."
     err "Reboot before running this stress test. See docs/build-fixes.md Fix 4."
@@ -647,17 +575,9 @@ print(f'{vram:.2f} {gtt:.2f} {gpu:.0f} {temp:.0f}')")
     PEAK_TEMP_C=$(printf   '%s' "$peaks" | awk '{print $4}')
 fi
 
-# Post-run dmesg deltas.
-POST_MES_DMESG=""
-if command -v sudo >/dev/null 2>&1; then
-    POST_MES_DMESG=$(sudo --non-interactive dmesg 2>/dev/null \
-        | grep --extended-regexp 'MES failed to respond|amdgpu_mes_reg_write_reg_wait|MES ring buffer is full' \
-        || true)
-fi
-POST_MES_TIMEOUT_COUNT=$(printf '%s\n' "$POST_MES_DMESG" | grep --count --extended-regexp \
-    'MES failed to respond|amdgpu_mes_reg_write_reg_wait' || true)
-POST_MES_RING_FULL_COUNT=$(printf '%s\n' "$POST_MES_DMESG" | grep --count --extended-regexp \
-    'MES ring buffer is full' || true)
+# Post-run dmesg deltas (helpers from lib/dmesg.sh).
+POST_MES_TIMEOUT_COUNT=$(mes_count_timeouts)
+POST_MES_RING_FULL_COUNT=$(mes_count_ring_full)
 NEW_TIMEOUT=$((POST_MES_TIMEOUT_COUNT - PRE_MES_TIMEOUT_COUNT))
 NEW_RING_FULL=$((POST_MES_RING_FULL_COUNT - PRE_MES_RING_FULL_COUNT))
 [ "$NEW_TIMEOUT" -lt 0 ] && NEW_TIMEOUT=0

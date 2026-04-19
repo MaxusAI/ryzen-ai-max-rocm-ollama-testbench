@@ -54,7 +54,11 @@ HOST_PORT="${HOST_PORT:-11434}"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-${SERVICE:-ollama}}"   # docker compose service name (NOT container_name)
 DRI_INDEX="${DRI_INDEX:-1}"   # /sys/kernel/debug/dri/<idx>/ - 1 on this box
 HIP_TEST_SRC="${HIP_TEST_SRC:-${REPO_ROOT}/scripts/hip-kernel-test.cpp}"
-HIP_TEST_BIN="${HIP_TEST_BIN:-/tmp/hip-kernel-test}"
+# HIP_TEST_BIN: empty by default; layer_2 mktemps a per-run path so a stale
+# root-owned /tmp/hip-kernel-test from a previous `sudo ./scripts/validate.sh`
+# run can't make hipcc fail with a misleading "ROCm install is broken" error.
+# Set this env var explicitly only if you want to inspect the binary after.
+HIP_TEST_BIN="${HIP_TEST_BIN:-}"
 LONG_CTX_OUT="${LONG_CTX_OUT:-/tmp/long_ctx_validate.out}"
 SMOKE_MODEL="${SMOKE_MODEL:-llama3.2:latest}"
 LONG_CTX_MODEL="${LONG_CTX_MODEL:-gemma4:e4b-it-q4_K_M}"   # capped at 128K but works
@@ -70,20 +74,16 @@ DETECTED_MODE=          # set by detect_mode() once layers start
 CONTAINER_NAME=         # set by detect_mode() in container mode (from 'docker compose ps')
 
 # ---------------------------------------------------------------------------
-# pretty-printing
+# pretty-printing (colors from scripts/lib/pretty.sh; layer-aware
+# pass/fail/skip/print_header are validate-specific and stay local. Our
+# `info` shadows pretty.sh's variant so we keep the dim styling that
+# matches Layer hint lines.)
 # ---------------------------------------------------------------------------
 
-if [ -t 1 ]; then
-    C_RESET=$'\e[0m'
-    C_RED=$'\e[31m'
-    C_GREEN=$'\e[32m'
-    C_YELLOW=$'\e[33m'
-    C_BLUE=$'\e[34m'
-    C_BOLD=$'\e[1m'
-    C_DIM=$'\e[2m'
-else
-    C_RESET= C_RED= C_GREEN= C_YELLOW= C_BLUE= C_BOLD= C_DIM=
-fi
+# shellcheck source=lib/pretty.sh
+. "${REPO_ROOT}/scripts/lib/pretty.sh"
+# shellcheck source=lib/api.sh
+. "${REPO_ROOT}/scripts/lib/api.sh"
 
 declare -a RESULTS=()   # "<layer>|<status>|<message>"
 
@@ -110,6 +110,9 @@ skip() {
     RESULTS+=("${layer}|SKIP|${msg}")
 }
 
+# validate-specific: dim styling so "info" lines visually recede behind
+# the colored PASS/FAIL/SKIP labels. Different from pretty.sh's plain
+# `info()` and intentionally so.
 info() {
     printf '  %s%s%s\n' "${C_DIM}" "$1" "${C_RESET}"
 }
@@ -356,8 +359,9 @@ compose_container_name() {
 }
 
 api_responding() {
-    curl --silent --show-error --max-time 3 --fail \
-        "http://localhost:${HOST_PORT}/api/version" >/dev/null 2>&1
+    # Thin alias kept so existing call sites read naturally; api.sh's
+    # api_alive does the actual check (with the same 3s timeout).
+    api_alive 3
 }
 
 # Find the PID listening on $HOST_PORT (any of TCP4/TCP6/UDS routed via
@@ -455,13 +459,6 @@ host_layer5_hint() {
     info "${C_YELLOW}!!   - 'set OLLAMA_ROCM=1 + GGML_USE_ROCM=1' - NO, Ollama 0.21.0${C_RESET}"
     info "${C_YELLOW}!!     prefers ROCm over Vulkan on its own when the rocm runner works${C_RESET}"
     info "${C_YELLOW}!! Full story: docs/build-fixes.md#fix-5${C_RESET}"
-}
-
-# Backwards-compatible alias. Old call sites still reference the
-# user_group_* name; keep both pointing at the same body so a
-# downstream copy of this script doesn't break.
-user_group_hint_if_host() {
-    host_layer5_hint
 }
 
 detect_mode() {
@@ -596,14 +593,16 @@ layer_1() {
     # complete), but "ring buffer is full" means the GPU is wedged:
     # demote that to a hard warning that tells the user to reboot.
     # See docs/build-fixes.md "Future-proofing" for the full picture.
+    # Source dmesg.sh lazily (on first call) so layers that don't run
+    # this code path don't pay the source cost.
+    # shellcheck source=lib/dmesg.sh
+    . "${REPO_ROOT}/scripts/lib/dmesg.sh"
     local mes_dmesg
-    mes_dmesg=$(sudo --non-interactive dmesg --ctime 2>/dev/null \
-        | grep --extended-regexp 'MES failed to respond|amdgpu_mes_reg_write_reg_wait|MES ring buffer is full' \
-        | tail -n 5 || true)
+    mes_dmesg=$(mes_grep_recent 5)
     if [ -n "$mes_dmesg" ]; then
         warn "kernel reported MES errors since boot (separate kernel bug, NOT the 0x83 firmware issue):"
         printf '%s\n' "$mes_dmesg" | sed 's|^|        |'
-        if printf '%s' "$mes_dmesg" | grep --quiet 'MES ring buffer is full'; then
+        if printf '%s' "$mes_dmesg" | grep --quiet --extended-regexp "$MES_RING_FULL_REGEX"; then
             warn "  -> 'MES ring buffer is full' = GPU is WEDGED until reboot (drm/amd work_items/4749)"
             warn "  -> reboot to recover; Layers 5-8 below will likely fail until you do"
         fi
@@ -633,17 +632,32 @@ layer_2() {
             "Reset HIP_TEST_SRC env var or restore scripts/hip-kernel-test.cpp"
         return
     fi
-    info "compiling $HIP_TEST_SRC for gfx1151..."
+    # Pick a fresh per-run binary path (or honor an explicit override).
+    # Without this, a previous `sudo ./scripts/validate.sh` run leaves
+    # /tmp/hip-kernel-test owned by root and the next non-sudo run fails
+    # at link time with "ld.lld: failed to write output: Permission denied",
+    # which the old code reported as "ROCm install is broken".
+    local hip_test_bin="$HIP_TEST_BIN"
+    if [ -z "$hip_test_bin" ]; then
+        hip_test_bin=$(mktemp --tmpdir hip-kernel-test.XXXXXXXX)
+        # shellcheck disable=SC2064  # expand $hip_test_bin now, not on RETURN
+        trap "rm --force \"$hip_test_bin\" 2>/dev/null || true" RETURN
+    elif [ -e "$hip_test_bin" ] && ! rm --force "$hip_test_bin" 2>/dev/null; then
+        fail 2 "cannot remove stale $hip_test_bin (owned by root from a prior sudo run?)" \
+            "sudo --non-interactive rm --force $hip_test_bin and re-run"
+        return
+    fi
+    info "compiling $HIP_TEST_SRC for gfx1151 -> $hip_test_bin..."
     # hipcc --help only documents the short -o form for the output flag.
     if ! hipcc --offload-arch=gfx1151 \
             "$HIP_TEST_SRC" \
-            -o "$HIP_TEST_BIN" 2>&1 | sed 's/^/    /'; then
+            -o "$hip_test_bin" 2>&1 | sed 's/^/    /'; then
         fail 2 "hipcc compile failed" "ROCm install on the host is broken"
         return
     fi
-    info "running $HIP_TEST_BIN..."
+    info "running $hip_test_bin..."
     local out rc
-    out=$(timeout 30 "$HIP_TEST_BIN" 2>&1 || true)
+    out=$(timeout 30 "$hip_test_bin" 2>&1 || true)
     rc=$?
     info "output: $out"
     if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep --quiet '^out=12345$'; then
@@ -945,17 +959,17 @@ layer_5_finalize() {
         FAIL_CPU)
             fail 5 "Ollama silently fell back to library=cpu" \
                 "GPU discovery faulted; re-check Layer 1 (MES firmware) and dmesg | grep gfxhub"
-            user_group_hint_if_host
+            host_layer5_hint
             ;;
         FAIL_VULKAN)
             fail 5 "Ollama is using library=Vulkan, NOT ROCm" \
                 "This Ollama binary was built with Vulkan support; the goal is ROCm. In container mode use 'make build && make up'. In host mode replace your host install with a ROCm-built ollama (or just use --mode container)."
-            user_group_hint_if_host
+            host_layer5_hint
             ;;
         FAIL_OTHER_LIB)
             fail 5 "Ollama is using a non-ROCm library (see above)" \
                 "Wrong Ollama build for this hardware. Rebuild against ROCm 7.x."
-            user_group_hint_if_host
+            host_layer5_hint
             ;;
         UNKNOWN|*)
             fail 5 "unexpected inference compute line (see above)" \
@@ -967,18 +981,12 @@ layer_5_finalize() {
     fi
 }
 
-# Tiny model load helper for host-mode Layer 5: load whatever's smallest.
+# Tiny model load helper for host-mode Layer 5: load whatever's smallest
+# so we don't blow VRAM on a Layer-5 sanity check on machines where the
+# largest model is half a TB.
 api_load_tiny_model() {
     local first_model
-    first_model=$(curl --silent --max-time 5 "http://localhost:${HOST_PORT}/api/tags" 2>/dev/null \
-        | python3 -c 'import json,sys
-try:
-    j=json.loads(sys.stdin.read())
-    models=j.get("models",[])
-    models.sort(key=lambda m: m.get("size", 1<<62))
-    print(models[0]["name"] if models else "")
-except Exception:
-    print("")' 2>/dev/null)
+    first_model=$(api_smallest_model)
     if [ -z "$first_model" ]; then
         info "no installed models found via /api/tags"
         return 1
@@ -1196,6 +1204,16 @@ if [ "$DETECTED_MODE" = "container" ]; then
 fi
 [ -n "$ONLY_LAYER" ] && printf '  only layer: %s\n' "$ONLY_LAYER"
 [ "$FROM_LAYER" -gt 0 ] && printf '  from layer: %s\n' "$FROM_LAYER"
+
+# Several layers (1: MES dmesg + debugfs read; 5: journalctl in host mode;
+# 7: rocm-smi inside container) shell out to `sudo --non-interactive`.
+# Warn early so users don't see cryptic "permission denied" inside layers.
+if [ "$(id -u)" -ne 0 ] && ! sudo --non-interactive true 2>/dev/null; then
+    printf '  %ssudo:%s no cached credentials - some layers will report partial\n' \
+        "${C_YELLOW}" "${C_RESET}"
+    printf '         results. Pre-cache with: %ssudo -v%s, then re-run.\n' \
+        "${C_DIM}" "${C_RESET}"
+fi
 
 for layer in 0 1 2 3 4 5 6 7 8; do
     if should_run "$layer"; then

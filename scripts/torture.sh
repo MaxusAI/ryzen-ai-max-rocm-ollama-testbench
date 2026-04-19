@@ -47,23 +47,22 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/snapshot.sh
 . "${REPO_ROOT}/scripts/lib/snapshot.sh"
+# shellcheck source=lib/dmesg.sh
+. "${REPO_ROOT}/scripts/lib/dmesg.sh"
+# shellcheck source=lib/api.sh
+. "${REPO_ROOT}/scripts/lib/api.sh"
 
 # ---------------------------------------------------------------------------
-# pretty
+# pretty (colors + info/ok/warn/header from scripts/lib/pretty.sh;
+# torture-specific fail/dim are defined locally below)
 # ---------------------------------------------------------------------------
 
-if [ -t 1 ]; then
-    C_RESET=$'\e[0m'; C_RED=$'\e[31m'; C_GREEN=$'\e[32m'
-    C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
-else
-    C_RESET= C_RED= C_GREEN= C_YELLOW= C_BLUE= C_BOLD= C_DIM=
-fi
+# shellcheck source=lib/pretty.sh
+. "${REPO_ROOT}/scripts/lib/pretty.sh"
 
-header() { printf '\n%s%s===== %s =====%s\n' "$C_BOLD" "$C_BLUE" "$1" "$C_RESET"; }
-info()   { printf '  %s\n' "$1"; }
-ok()     { printf '  %s[ OK ]%s %s\n' "$C_GREEN" "$C_RESET" "$1"; }
-warn()   { printf '  %s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$1"; }
+# fail: like err() but on stdout (torture report stays in one stream).
 fail()   { printf '  %s[FAIL]%s %s\n' "$C_RED" "$C_RESET" "$1"; }
+# dim: torture-only; suppressed/secondary info inside stage output.
 dim()    { printf '  %s%s%s\n' "$C_DIM" "$1" "$C_RESET"; }
 
 # ---------------------------------------------------------------------------
@@ -113,18 +112,11 @@ fi
 
 choose_model() {
     if [ -n "$MODEL" ]; then return; fi
-    local raw
-    raw=$(curl --silent --max-time 5 "${OLLAMA_HOST_URL}/api/tags" 2>/dev/null || true)
-    if [ -z "$raw" ]; then
-        echo "ERROR: cannot reach ${OLLAMA_HOST_URL}/api/tags - is Ollama running?" >&2
+    if ! api_alive 5; then
+        echo "ERROR: cannot reach ${OLLAMA_HOST_URL}/api/version - is Ollama running?" >&2
         exit 2
     fi
-    MODEL=$(printf '%s' "$raw" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-models = sorted(d.get("models",[]), key=lambda x: -x.get("size", 0))
-print(models[0]["name"] if models else "")
-')
+    MODEL=$(api_largest_model)
     if [ -z "$MODEL" ]; then
         echo "ERROR: no models installed - pull one first (e.g. ollama pull llama3.2:latest)" >&2
         exit 2
@@ -210,32 +202,20 @@ stage_register \
     "--num-ctx 262144 --concurrency 16 --requests 16 --num-predict 32 --prompt-frac 0.005"
 
 # ---------------------------------------------------------------------------
-# health checks
+# health checks (api_alive + gpu_wedged + per-mode MES counters live in
+# scripts/lib/api.sh and scripts/lib/dmesg.sh respectively)
 # ---------------------------------------------------------------------------
 
-# Returns 0 if API responds, non-zero otherwise.
-api_alive() {
-    curl --silent --max-time 5 --fail --output /dev/null \
-        "${OLLAMA_HOST_URL}/api/version"
-}
-
-# Returns 0 if the GPU is currently wedged (MES ring full = nothing
-# the script can do, requires reboot or amdgpu reset).
-gpu_wedged() {
-    sudo --non-interactive dmesg --buffer-size=1048576 2>/dev/null \
-        | tail -n 200 \
-        | grep --quiet --extended-regexp 'MES.*ring.*full|MES failed|MES is hung|amdgpu_amdkfd_pre_reset|GPU reset begin'
-}
-
-# Print MES + queue stats from dmesg as JSON. Used to compute pre/post
-# diffs around each stage.
+# gpu_wedged + per-mode MES counters live in scripts/lib/dmesg.sh.
+# `mes_counters` here keeps its 4-tuple shape because it's the format
+# torture.sh's stage diff loop expects (cheap to keep, no other caller
+# wants the same shape).
 mes_counters() {
-    local timeouts ring_full evictions vm_faults
-    timeouts=$(  sudo --non-interactive dmesg 2>/dev/null | grep --count --extended-regexp 'MES.*timeout'      || true)
-    ring_full=$( sudo --non-interactive dmesg 2>/dev/null | grep --count --extended-regexp 'MES.*ring.*full'   || true)
-    evictions=$( sudo --non-interactive dmesg 2>/dev/null | grep --count --extended-regexp 'queue evicted'     || true)
-    vm_faults=$( sudo --non-interactive dmesg 2>/dev/null | grep --count --extended-regexp 'amdgpu.*VM_L2|amdgpu.*page fault' || true)
-    printf '%s %s %s %s' "${timeouts:-0}" "${ring_full:-0}" "${evictions:-0}" "${vm_faults:-0}"
+    printf '%s %s %s %s' \
+        "$(mes_count_timeouts)" \
+        "$(mes_count_ring_full)" \
+        "$(mes_count_evictions)" \
+        "$(mes_count_vm_faults)"
 }
 
 # VRAM usage in GiB (from amdgpu sysfs - the only iGPU-accurate source).

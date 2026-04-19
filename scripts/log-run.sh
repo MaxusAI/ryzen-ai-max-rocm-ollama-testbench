@@ -40,6 +40,8 @@ set -o pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/snapshot.sh
 . "${REPO_ROOT}/scripts/lib/snapshot.sh"
+# shellcheck source=lib/dmesg.sh
+. "${REPO_ROOT}/scripts/lib/dmesg.sh"
 
 LOG_PATH="${RUN_HISTORY_LOG:-${REPO_ROOT}/logs/run-history.jsonl}"
 KIND=""
@@ -47,15 +49,12 @@ LABEL=""
 DO_TEE=1
 
 # ---------------------------------------------------------------------------
-# pretty
+# pretty (colors only - we use raw printf below; pretty.sh's helpers
+# would shadow our custom show/diff/wrap formatters if invoked).
 # ---------------------------------------------------------------------------
 
-if [ -t 1 ]; then
-    C_RESET=$'\e[0m'; C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'
-    C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
-else
-    C_RESET= C_GREEN= C_YELLOW= C_BLUE= C_BOLD= C_DIM=
-fi
+# shellcheck source=lib/pretty.sh
+. "${REPO_ROOT}/scripts/lib/pretty.sh"
 
 # ---------------------------------------------------------------------------
 # subcommand: show
@@ -250,16 +249,9 @@ cmd_wrap() {
     esac
 
     # MES dmesg fingerprint at the time of recording (best-effort, may be empty).
-    # Note: 'grep --count' itself prints "0" on no-match AND exits non-zero,
-    # so we use `|| true` (NOT `|| printf 0`) to avoid emitting "0\n0".
-    local mes_warnings_count=0
-    if command -v sudo >/dev/null 2>&1; then
-        mes_warnings_count=$(sudo --non-interactive dmesg 2>/dev/null \
-            | grep --extended-regexp --count \
-                'MES failed to respond|amdgpu_mes_reg_write_reg_wait|MES ring buffer is full' \
-            || true)
-        [ -z "$mes_warnings_count" ] && mes_warnings_count=0
-    fi
+    # mes_count_total handles dmesg/sudo gating + always returns a number.
+    local mes_warnings_count
+    mes_warnings_count=$(mes_count_total)
 
     local label_json="null"
     if [ -n "$LABEL" ]; then

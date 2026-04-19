@@ -13,6 +13,11 @@
 # to print this table from a live shell):
 #
 #   0x74  community-tested OK on older kernels (Framework user, kernel 6.13)
+#   0x7c  intermediate revision seen on some hosts after this script applied
+#         the 0x80 override and the kernel re-resolved through firmware
+#         search-path precedence. Empirically safe on kernel 6.14 (no
+#         page-faults observed); included here for completeness so --check
+#         doesn't print 'unknown' for it.
 #   0x80  default for this script. Last known-good Ubuntu shipped before 0x83
 #         regression. Verified on this repo's box, kernel 6.14.0-1018-oem.
 #   0x83  BROKEN on Ubuntu Noble linux-firmware
@@ -147,21 +152,12 @@ DO_CHECK=0
 DO_LIST_KNOWN=0
 
 # ---------------------------------------------------------------------------
-# pretty-printing
+# pretty-printing (colors + info/ok/warn/err/header from scripts/lib/pretty.sh)
 # ---------------------------------------------------------------------------
 
-if [ -t 1 ]; then
-    C_RESET=$'\e[0m'; C_RED=$'\e[31m'; C_GREEN=$'\e[32m'
-    C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
-else
-    C_RESET= C_RED= C_GREEN= C_YELLOW= C_BLUE= C_BOLD= C_DIM=
-fi
-
-info()  { printf '  %s\n' "$1"; }
-ok()    { printf '  %s[ OK ]%s %s\n' "${C_GREEN}" "${C_RESET}" "$1"; }
-warn()  { printf '  %s[WARN]%s %s\n' "${C_YELLOW}" "${C_RESET}" "$1"; }
-err()   { printf '  %s[FAIL]%s %s\n' "${C_RED}" "${C_RESET}" "$1" >&2; }
-header(){ printf '\n%s%s%s\n' "${C_BOLD}${C_BLUE}" "$1" "${C_RESET}"; }
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/pretty.sh
+. "${REPO_ROOT}/scripts/lib/pretty.sh"
 
 usage() {
     sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
@@ -407,6 +403,11 @@ action_list_known() {
     -------  --------------------  ----------------------------------------------
     0x74     OK on older kernels   Reported by Framework community on
                                    amd-ai-300; see "Related discussions" below
+    0x7c     OK (intermediate)     Seen on hosts where the kernel resolved a
+                                   different blob from the firmware search path
+                                   after this script applied the 0x80 override.
+                                   Empirically safe on kernel 6.14; included so
+                                   --check classifies it correctly.
     0x80     OK (this script's     kernel-firmware commit
              default - pinned)     e2c1b151087b2983249e106868877bd19761b976
                                    (2025-07-16). Verified on this repo's box.
