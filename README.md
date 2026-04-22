@@ -64,8 +64,8 @@ the right place.
 ## Quickstart
 
 ```bash
-git clone --recursive https://github.com/MaxusAI/ryzen-ai-max-rocm-ollama-validator
-cd ryzen-ai-max-rocm-ollama-validator
+git clone --recursive https://github.com/MaxusAI/ryzen-ai-max-rocm-ollama-testbench
+cd ryzen-ai-max-rocm-ollama-testbench
 
 ./quickstart.sh --build      # FIRST run: build the ROCm image (~30 min), then up + validate
 ./quickstart.sh              # AFTER first build: skip build, just up + validate
