@@ -71,6 +71,21 @@ if [ "$DO_BUILD" -eq 1 ] && [ "$DO_UP" -eq 0 ]; then
     exit 2
 fi
 
+# _port_listener <port> - print the LISTEN row(s) for a TCP port, empty if
+# nothing is bound. Used to pre-empt the most common quickstart failure: the
+# host's bundled ollama.service still binding :11434 and shadowing our
+# container at the bind layer (docker emits an unhelpful 'address already
+# in use' with no hint that systemctl stop ollama is the fix).
+_port_listener() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss --tcp --listening --processes --numeric "sport = :${port}" 2>/dev/null \
+            | awk 'NR>1 {print}'
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # step 1: prereqs
 # ---------------------------------------------------------------------------
@@ -192,9 +207,30 @@ if [ "$DO_UP" -eq 1 ]; then
 
     header "docker compose up"
 
+    # Pre-flight: bail early if HOST_PORT is already bound. The most common
+    # cause is the host's bundled ollama systemd service - the README's
+    # PREREQUISITE - still being active.
+    listener=$(_port_listener "$HOST_PORT")
+    if [ -n "$listener" ]; then
+        err "port ${HOST_PORT} on the host is already in use:"
+        printf '%s\n' "$listener" | sed 's/^/         /'
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ollama 2>/dev/null; then
+            err "the host's bundled 'ollama' systemd service is running and binding :${HOST_PORT}"
+            info "fix it once:  sudo systemctl stop ollama && sudo systemctl disable ollama"
+            info "then re-run:  ./quickstart.sh"
+            info "(see README 'Compose / security' note for context)"
+        else
+            info "free port ${HOST_PORT} or run with a different port: HOST_PORT=11500 ./quickstart.sh"
+        fi
+        exit 1
+    fi
+
     info "running: $COMPOSE up --detach $SERVICE"
     cd "$REPO_ROOT"
-    $COMPOSE up --detach "$SERVICE"
+    if ! $COMPOSE up --detach "$SERVICE"; then
+        err "$COMPOSE up failed - inspect with: $COMPOSE logs --tail 100 $SERVICE"
+        exit 1
+    fi
 
     info "waiting for /api/tags on http://localhost:${HOST_PORT} (up to 90s)"
     deadline=$(( $(date +%s) + 90 ))
