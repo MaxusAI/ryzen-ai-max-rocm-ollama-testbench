@@ -7,7 +7,7 @@ CTX            ?= 262144
 HOST_PORT      ?= 11434
 
 .PHONY: help submodules build up down restart logs shell gpu-check ps test-fa rocm-smi clean-image \
-        validate validate-full validate-logged mes-check install-mes-firmware \
+        quickstart validate validate-full validate-logged mes-check install-mes-firmware \
         stress-test stress-test-quick run-history
 
 help: ## Show this help.
@@ -87,6 +87,9 @@ test-fa: ## Fire one short generation at $(CTX) ctx, then classify the FA branch
 
 clean-image: ## Remove the built image (forces a full rebuild next time).
 	docker image rm amd-rocm-ollama:7.2.2 || true
+
+quickstart: ## End-to-end host bring-up: prereq check + .env scaffold + compose up + auto-pull smoke + validate. Flags via ARGS=, e.g. `make quickstart ARGS="--build"`.
+	./quickstart.sh $(ARGS)
 
 validate: ## Run the 9-layer validation ladder, skipping the slow Layer 8. Pass extra flags via ARGS=, e.g. `make validate ARGS="--mode host --layer 5"`.
 	./scripts/validate.sh --skip-long-ctx $(ARGS)
