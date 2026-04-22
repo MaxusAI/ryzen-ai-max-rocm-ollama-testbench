@@ -61,6 +61,46 @@ the right place.
 
 ---
 
+## Quickstart
+
+```bash
+git clone --recursive https://github.com/MaxusAI/ryzen-ai-max-rocm-ollama-validator
+cd ryzen-ai-max-rocm-ollama-validator
+
+./quickstart.sh --build      # FIRST run: build the ROCm image (~30 min), then up + validate
+./quickstart.sh              # AFTER first build: skip build, just up + validate
+./quickstart.sh --skip-up    # validate the host-installed ollama instead of the container
+./quickstart.sh --no-pull    # don't auto-pull llama3.2:latest if no models are installed
+```
+
+`./quickstart.sh` is the one command a brand-new box needs. It does, in order:
+
+1. Prereq check (`docker`, `docker compose`, `/dev/kfd`, `/dev/dri/renderD*`,
+   host `video`/`render` groups).
+2. `git submodule update --init --recursive` (idempotent).
+3. Scaffold `.env` from [`.env.example`](.env.example), auto-patching
+   `VIDEO_GID`/`RENDER_GID` from your host if they differ from the Ubuntu
+   24.04 defaults.
+4. Image presence check (`amd-rocm-ollama:7.2.2`). **Fail fast** if not
+   built — `--build` is the explicit opt-in for the slow ROCm compile.
+5. `docker compose up --detach` and wait up to 90s for `/api/tags`.
+6. **Auto-pull `llama3.2:latest` (~2 GiB)** *only if* no models are installed,
+   so the smoke test has something to load. Suppress with `--no-pull`.
+7. `./scripts/validate.sh --skip-long-ctx` — Layers 0-7 of the
+   [9-layer ladder](docs/validation-tests.md). Layer 8 (~200K-token prefill,
+   4-25 min) stays opt-in via `make validate-full`.
+
+`make quickstart` is the same script (use `ARGS=...` to pass flags through:
+`make quickstart ARGS="--build"`).
+
+The validator picks the smoke and long-context models dynamically: it uses
+the historical defaults (`llama3.2:latest`, `gemma4:e4b-it-q4_K_M`) if
+present, otherwise falls back to the smallest installed model (smoke) and
+the largest installed model with declared context ≥ 128K (long-ctx). Set
+`SMOKE_MODEL=...` / `LONG_CTX_MODEL=...` to pin specific tags.
+
+---
+
 Docker stack that builds [ollama](https://github.com/ollama/ollama) **v0.21.0** from
 source against **ROCm 7.2.2** with native **gfx1151 (Strix Halo)** support, and serves
 **Gemma 4** with up to a **256K** context window on an AMD Ryzen AI MAX+ 395 / Radeon
