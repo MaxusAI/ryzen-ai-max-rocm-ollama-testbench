@@ -5,6 +5,14 @@ source against **ROCm 7.2.2** with native **gfx1151 (Strix Halo)** support, and 
 **Gemma 4** with up to a **256K** context window on an AMD Ryzen AI MAX+ 395 / Radeon
 8060S APU.
 
+**Who this is for:** AMD **Strix Halo** (`gfx1151`), **Ubuntu 24.04**-style host,
+Docker, and the stack versions pinned in this README. **Not for:** other GPUs
+(Navi, CDNA, Phoenix, …), prebuilt images for every distro, or generic “any ROCm”
+support.
+
+**Clone:** use `git clone --recursive <url>` **or** run `make submodules` before
+`make build` / `docker compose build` so `external/ollama/` is populated.
+
 - No Vulkan, no CUDA, no NVIDIA paths.
 - Mounts the host model store at `/usr/share/ollama/.ollama` so existing pulls
   (e.g. `gemma4:31b-it-q4_K_M`) work immediately.
@@ -31,6 +39,7 @@ source against **ROCm 7.2.2** with native **gfx1151 (Strix Halo)** support, and 
 | ------------------- | ----------------------------------------------------------- |
 | GPU                 | AMD Ryzen AI MAX+ 395 / Radeon 8060S (Strix Halo APU)       |
 | ISA                 | `gfx1151` (RDNA 3.5)                                        |
+| Total UMA (LPDDR5X) | ~128 GiB (BIOS splits **96 GiB** to GPU pool, **31 GiB** to system) |
 | GPU VRAM (UMA)      | 96 GiB (BIOS UMA split)                                     |
 | System RAM          | 31 GiB                                                      |
 | ROCk module         | 6.16.13 / HSA Runtime 1.18                                  |
@@ -170,6 +179,11 @@ curl http://localhost:11434/api/generate -d '{
 
 `docker compose exec ollama ollama ps` should report `100% GPU` for the loaded model.
 
+**Compose / security:** [`docker-compose.yml`](docker-compose.yml) enables
+`SYS_PTRACE`, `seccomp=unconfined`, and `ipc: host` to keep ROCm debugging
+practical. Treat that as an intentional trade-off for a single-user lab host,
+not a minimal production hardening profile.
+
 ---
 
 ## Setting the 256K context
@@ -185,7 +199,8 @@ by the caller per request:
 
 `OLLAMA_CONTEXT_LENGTH` is intentionally **not** set in `docker-compose.yml`.
 The default (`0`) lets ollama auto-pick `4k`/`32k`/`256k` based on detected
-VRAM (see [external/ollama/envconfig/config.go:326](external/ollama/envconfig/config.go))
+VRAM (see `ContextLength` / `OLLAMA_CONTEXT_LENGTH` in
+[`external/ollama/envconfig/config.go`](external/ollama/envconfig/config.go))
 so smaller models like `llama3.2` aren't unnecessarily inflated. Set context
 per request, not server-wide.
 
@@ -270,7 +285,9 @@ make logs | grep --extended-regexp 'discovered|rocm|hip|gfx'
 ```
 
 If `rocminfo` inside the container shows no agent but works on the host, you
-likely have a permission issue on `/dev/kfd` or `/dev/dri/renderD128`. Confirm
+likely have a permission issue on `/dev/kfd` or a **render** node under
+`/dev/dri/` (e.g. `renderD128`; run `ls /dev/dri` — the index varies by machine).
+Confirm
 your host's `render` and `video` group ids and update `group_add:` in
 [docker-compose.yml](docker-compose.yml):
 
@@ -360,7 +377,7 @@ make build
 │   ├── build-fixes.md            #   first-build failures + fixes applied
 │   ├── rocblas-prune.md          #   what the gfx1151-only rocBLAS prune keeps
 │   └── validation-tests.md       #   per-layer spec for the 9-layer validate ladder
-├── external/ollama/              # git submodule pinned to v0.21.0 (.gitmodules)
+├── external/ollama/              # git submodule (URL in .gitmodules; commit = v0.21.0 in parent repo)
 ├── logs/                         # gitignored: per-machine JSONL run history
 ├── scripts/                      # see scripts/README.md
 │   ├── lib/                      #   sourceable bash + python helpers (api, dmesg, pretty, snapshot, parse_*)
@@ -375,6 +392,12 @@ make build
 ```
 
 ---
+
+## License and upstream
+
+The repository overlay (everything **outside** `external/ollama/`) is licensed
+under the **MIT License**; see [`LICENSE`](LICENSE). The Ollama submodule keeps
+its own copyright: [`external/ollama/LICENSE`](external/ollama/LICENSE).
 
 ## Out of scope
 

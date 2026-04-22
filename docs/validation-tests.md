@@ -28,7 +28,7 @@ Layer 8 passes.
 | 5     | Ollama bootstrap discovery sees the GPU | 5 s    | Container saw `library=ROCm`, not silent CPU fallback |
 | 6     | Small inference (`llama3.2`)            | 5 s    | End-to-end token generation                           |
 | 7     | Memory math at 256K                     | 1 s    | Confirms VRAM headroom for the target context         |
-| 8     | Long-context inference (≥128K prefill)  | 4-25 m | The actual feature this repo exists for               |
+| 8     | Long-context inference (~`LONG_CTX_TOKENS` char budget, default 200K) | 4-25 m | Pass = HTTP OK + positive `prompt_eval_count` (actual tokens depend on model caps) |
 
 Numbers in this doc were captured on:
 
@@ -229,7 +229,7 @@ ollama-rocm   amd-rocm-ollama:7.2.2   Up About a minute (healthy)   0.0.0.0:1143
 
 | Symptom in logs                                            | Cause                                                                |
 | ---------------------------------------------------------- | -------------------------------------------------------------------- |
-| `permission denied` on `/dev/kfd` or `/dev/dri/renderD128` | Wrong `group_add:` in `docker-compose.yml`; run `getent group render video` and update |
+| `permission denied` on `/dev/kfd` or `/dev/dri/renderD*` | Wrong `group_add:` in `docker-compose.yml`; run `getent group render video` and update (render node index varies) |
 | Port `11434` already in use                                | Host `ollama` systemd service is still running (`sudo systemctl stop ollama`) |
 | `manifest unknown ...rocm/dev-ubuntu-24.04`                | `docker pull rocm/dev-ubuntu-24.04:7.2.2-complete` first |
 
@@ -366,9 +366,12 @@ sudo rocm-smi --showmeminfo vram
 
 ## Layer 8 — Long-context inference (the headline feature)
 
-**Requirement.** A ~200 K-token prompt completes prefill without faults
-and yields a generated response. The model that actually advertises 256 K
-is `gemma4:31b-it-q4_K_M`; `gemma4:e4b-it-q4_K_M` truncates at 128 K.
+**Requirement.** The Layer 8 script sends a long prompt (default: character
+budget from `LONG_CTX_TOKENS`, usually targeting a **~200K-token** prefill on
+`gemma4:31b-it-q4_K_M`). The harness passes on HTTP success with positive
+`prompt_eval_count` (models with lower `n_ctx_train` cap tokens, as in the e4b
+example below). The model that actually advertises 256 K is
+`gemma4:31b-it-q4_K_M`; `gemma4:e4b-it-q4_K_M` truncates at 128 K.
 
 The reusable test script lives at [`/tmp/long_ctx_test.py`](#test-script);
 re-create from the snippet below. It builds a prompt of ~200 K tokens,

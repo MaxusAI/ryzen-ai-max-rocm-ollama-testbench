@@ -55,8 +55,8 @@ WORKDIR /src
 This makes both the `cpu` and `rocm-7` stages happy:
 
 - The `cpu` stage now configures HIP successfully but only **builds** `ggml-cpu`
-  (the build preset declares `targets: ["ggml-cpu"]` in
-  [../external/ollama/CMakePresets.json:128](../external/ollama/CMakePresets.json)),
+  (the `CPU` **build** preset declares `targets: ["ggml-cpu"]` in
+  [../external/ollama/CMakePresets.json](../external/ollama/CMakePresets.json) under `buildPresets`),
   so the HIP backend is parsed but never compiled in this stage. The
   `cmake --install build --component CPU --strip` step only copies CPU artifacts.
 - The `rocm-7` stage was already setting `PATH=/opt/rocm/bin:$PATH`, but PATH
@@ -583,8 +583,8 @@ order:
    `source=server.go:445 msg=subprocess` line.
 
 `User=ollama Group=ollama` (the install-script default) is fine -
-leave it alone. On a healthy Strix Halo box `/dev/kfd` and
-`/dev/dri/renderD128` are mode `0666` (world-rw) and the systemd unit
+leave it alone. On a healthy Strix Halo box `/dev/kfd` and the active
+`/dev/dri/renderD*` node (often `renderD128`; index varies) are mode `0666` (world-rw) and the systemd unit
 inherits the `render`/`video` supplementary groups via `initgroups(3)`,
 so the `ollama` user has every permission it needs. To verify on your
 own box:

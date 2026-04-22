@@ -79,8 +79,8 @@ services:
 
       # Server-wide context length is intentionally NOT set here. With
       # OLLAMA_CONTEXT_LENGTH unset (default 0), ollama auto-picks per model
-      # (see external/ollama/envconfig/config.go:326). Clients ask for 256K via
-      # `options.num_ctx=262144` per request; smaller models stay small.
+      # (see `ContextLength` in external/ollama/envconfig/config.go). Clients ask
+      # for 256K via `options.num_ctx=262144` per request; smaller models stay small.
 
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://localhost:11434/api/tags"]
