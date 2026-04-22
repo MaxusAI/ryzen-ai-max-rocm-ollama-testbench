@@ -1,5 +1,66 @@
 # amd-rocm-ollama
 
+## Why this exists
+
+On a stock Ubuntu 24.04 install of Ollama on Strix Halo (`gfx1151`), one of two
+things happens, neither of them "the GPU is doing the work":
+
+1. **Silent CPU fallback.** `ollama run` answers, but every token is generated
+   on the CPU. `docker compose exec ollama ollama ps` reports `100% CPU` /
+   `0% GPU`, and `make logs` shows:
+
+   ```text
+   ... level=INFO source=types.go msg="inference compute" id=cpu library=cpu ...
+   ... level=INFO msg="vram-based default context" total_vram="0 B" default_num_ctx=4096
+   ```
+
+2. **Hard GPU page fault.** The runner finds the GPU, starts loading rocBLAS,
+   and the kernel page-faults on first dispatch:
+
+   ```text
+   ggml_cuda_init: found 1 ROCm devices:
+     Device 0: Radeon 8060S Graphics, gfx1151 (0x1151), VMM: no, Wave Size: 32
+   ggml_cuda_init: initializing rocBLAS on device 0
+   Memory access fault by GPU node-1 (Agent handle: 0x...) on address 0x... .
+      Reason: Page not present or supervisor privilege.
+   ... source=runner.go msg="failure during GPU discovery" error="runner crashed"
+   ... source=types.go msg="inference compute" id=cpu library=cpu ...
+   ```
+
+Behind those symptoms are **several** distinct root causes that all look
+identical in the logs:
+
+- **MES `0x83` firmware regression** — the kernel/driver pair ships an MES
+  build that page-faults on first dispatch. Detect with `make mes-check`.
+- **IOMMU not in passthrough mode** — missing `amd_iommu=on iommu=pt` on the
+  kernel cmdline.
+- **Over-aggressive rocBLAS prune** — keeping only `*gfx1151*` files deletes
+  the 54 arch-agnostic fallback `.dat` files and faults at first kernel call
+  (see [`docs/rocblas-prune.md`](docs/rocblas-prune.md)).
+- **Ollama upstream not building `gfx1151` natively** until a recent release.
+- **Permissions / wrong user.** On Linux, the default `ollama` systemd user
+  must pick up the host's `render` and `video` supplementary groups (so
+  `/dev/kfd` and `/dev/dri/renderD*` are accessible). If `initgroups(3)`
+  doesn't get them — custom unit overrides, missing groups, or a manually
+  spawned `ollama serve` outside the service — GPU discovery silently fails
+  and inference falls back to CPU. Switching to `User=root` (or running the
+  binary under `sudo`) is a blunt but effective workaround when the group
+  setup is broken. On **Windows**, the same class of bug appears when the
+  standard installer or `ollama.exe` is launched **without "Run as
+  administrator"**: the API comes up, but the unelevated process never sees
+  the GPU and every request runs on CPU.
+
+This repo is the documented fix for each Linux/Strix Halo variant —
+pinned versions, the working build, a 9-layer `make validate` ladder that
+names the failing layer (e.g. Layer 5: `FAIL_CPU` / `FAIL_VULKAN`), and the
+docs that map each symptom back to its actual cause in
+[`docs/build-fixes.md`](docs/build-fixes.md).
+
+If you saw any of the log lines above on your own Strix Halo box, you are in
+the right place.
+
+---
+
 Docker stack that builds [ollama](https://github.com/ollama/ollama) **v0.21.0** from
 source against **ROCm 7.2.2** with native **gfx1151 (Strix Halo)** support, and serves
 **Gemma 4** with up to a **256K** context window on an AMD Ryzen AI MAX+ 395 / Radeon
